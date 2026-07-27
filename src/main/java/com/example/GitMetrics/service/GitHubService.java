@@ -2,13 +2,11 @@ package com.example.GitMetrics.service;
 
 import com.example.GitMetrics.dto.GitHubResponse;
 import com.example.GitMetrics.dto.RepoAnalysisResponse;
-import com.example.GitMetrics.dto.TrackResponse;
 import com.example.GitMetrics.model.github;
 import com.example.GitMetrics.model.snap;
 import com.example.GitMetrics.repo.GitRepo;
 import com.example.GitMetrics.repo.SnapRepo;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Bean;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClient;
