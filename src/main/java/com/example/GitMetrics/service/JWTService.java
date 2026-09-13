@@ -29,7 +29,7 @@ public class JWTService {
         Map<String, Object> claims = new HashMap<>();
 
         return Jwts.builder()
-                .setClaims(claims)
+                .setClaims(claims)//claims : Header,Payload, Signature
                 .setSubject(username)
                 .setIssuedAt(new Date(System.currentTimeMillis()))
                 .setExpiration(new Date(System.currentTimeMillis() + 1000L * 60 * 60 * 10)) // 10 Hours
@@ -43,6 +43,7 @@ public class JWTService {
     }
 
     public String extractUserName(String token) {
+
         return extractClaim(token, Claims::getSubject);
     }
 

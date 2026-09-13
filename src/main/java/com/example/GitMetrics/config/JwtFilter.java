@@ -22,6 +22,9 @@ public class JwtFilter extends OncePerRequestFilter {
 
     @Autowired
     private JWTService jwtService;
+//    extract username from JWT
+//    validate JWT
+//    check expiration
 
     @Autowired
     private ApplicationContext context;
@@ -44,7 +47,7 @@ public class JwtFilter extends OncePerRequestFilter {
 
             if (jwtService.validateToken(token, userDetails)) {
                 UsernamePasswordAuthenticationToken authToken =
-                        new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
+                        new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());// password:null because we already have JWT
                 authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
                 SecurityContextHolder.getContext().setAuthentication(authToken);
             }
@@ -52,4 +55,4 @@ public class JwtFilter extends OncePerRequestFilter {
 
         filterChain.doFilter(request, response);
     }
-}
+}//SecurityContext Authenticates

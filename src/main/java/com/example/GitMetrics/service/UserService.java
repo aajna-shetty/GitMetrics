@@ -66,6 +66,34 @@ public class UserService {
     }
 
     @Transactional
+    public com.example.GitMetrics.dto.GitHubResponse trackRepoForUser(String userEmail, String repoUrl) {
+        User user = userRepo.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        com.example.GitMetrics.dto.GitHubResponse response = gitHubService.githubresponse(repoUrl);
+        github repo = gitRepo.findByUrl(repoUrl)
+                .orElseThrow(() -> new RuntimeException("Repo not found after fetch"));
+
+        user.getWatchlists().add(repo);
+        userRepo.save(user);
+        return response;
+    }
+
+    @Transactional(readOnly = true)
+    public RepoAnalysisResponse getRepoAnalysisForUser(String userEmail, String repoUrl) {
+        User user = userRepo.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        boolean watched = user.getWatchlists().stream()
+                .anyMatch(repo -> repoUrl.equals(repo.getUrl()));
+        if (!watched) {
+            throw new RuntimeException("Repository is not in the user's watchlist");
+        }
+
+        return gitHubService.getRepoAnalysis(repoUrl);
+    }
+
+    @Transactional
     public void addRepoToWatchlist(String userEmail, String repoUrl) {
         User user = userRepo.findByEmail(userEmail)
                 .orElseThrow(() -> new RuntimeException("User not found"));
@@ -75,7 +103,16 @@ public class UserService {
         github repo = gitRepo.findByUrl(repoUrl)
                 .orElseThrow(() -> new RuntimeException("Repo not found after fetch"));
 
-        user.getWatchlists().add(repo); // Fixed: changed from getWatchedRepositories() to getWatchlists()
+        user.getWatchlists().add(repo);
+        userRepo.save(user);
+    }
+
+    @Transactional
+    public void removeRepoFromWatchlist(String userEmail, String repoUrl) {
+        User user = userRepo.findByEmail(userEmail)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+
+        user.getWatchlists().removeIf(repo -> repoUrl.equals(repo.getUrl()));
         userRepo.save(user);
     }
 
@@ -84,7 +121,7 @@ public class UserService {
         User user = userRepo.findByEmail(userEmail)
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
-        Set<github> watchlists = user.getWatchlists(); // Fixed: changed from getWatchedRepositories() to getWatchlists()
+        Set<github> watchlists = user.getWatchlists();
 
         return watchlists.stream().map(repo -> {
             List<snap> history = snapRepo.findByGitHubOrderByCapturedAtDesc(repo, PageRequest.of(0, 2));

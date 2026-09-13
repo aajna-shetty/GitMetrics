@@ -39,6 +39,17 @@ public class UserController {
         return ResponseEntity.ok(Map.of("message", "Repository added to watchlist successfully."));
     }
 
+    @GetMapping("/watchlist")
+    public ResponseEntity<List<RepoAnalysisResponse>> getWatchlist(Authentication authentication) {
+        return ResponseEntity.ok(userService.getUserDashboard(authentication.getName()));
+    }
+
+    @DeleteMapping("/watchlist")
+    public ResponseEntity<?> removeFromWatchlist(Authentication authentication, @RequestParam String url) {
+        userService.removeRepoFromWatchlist(authentication.getName(), url);
+        return ResponseEntity.ok(Map.of("message", "Repository removed from watchlist successfully."));
+    }
+
     @GetMapping("/dashboard")
     public ResponseEntity<List<RepoAnalysisResponse>> getDashboard(Authentication authentication) {
         String userEmail = authentication.getName(); // Extracted from JWT automatically

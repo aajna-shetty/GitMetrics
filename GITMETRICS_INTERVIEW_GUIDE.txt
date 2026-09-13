@@ -1,0 +1,1562 @@
+GITMETRICS INTERVIEW GUIDE
+===========================
+
+Source of truth: the current repository contents. This guide describes what the code actually implements. Any proposal that is not present in the code is labeled RECOMMENDED IMPROVEMENT. Missing behavior is labeled CURRENTLY NOT IMPLEMENTED or NOT EVIDENT FROM THE CODE.
+
+1. PROJECT OVERVIEW
+===================
+
+GitMetrics is a Spring Boot REST backend that retrieves public GitHub repository metrics, calculates a simple repository health score, stores timestamped snapshots, and reports a growth trend. Users can register, log in, add repositories to a watchlist, and view a dashboard of watched repositories.
+
+The problem it addresses is repeated manual checking of GitHub repository statistics. Instead of opening GitHub and comparing stars, forks, and open issues by hand, a user can submit a repository URL. GitMetrics fetches current values, persists a snapshot, and compares recent health scores. A scheduled job also refreshes all known repositories hourly.
+
+Typical users would be developers, students, team leads, or project owners who want a lightweight history and dashboard for repositories. The code does not implement a frontend, so the client is currently a REST client, browser-based API tool, or future frontend. A visual frontend is CURRENTLY NOT IMPLEMENTED.
+
+Main implemented features:
+- User registration with BCrypt password hashing.
+- Login with email and password.
+- Stateless JWT authentication for protected endpoints.
+- GitHub repository tracking by URL.
+- GitHub REST API lookup of repository name, owner, stars, forks, and open issues.
+- Persistence of repositories and metric snapshots.
+- Health score calculation.
+- Growth trend based on the two newest snapshots.
+- User watchlists and dashboard responses.
+- Hourly synchronization of every stored repository.
+- Basic translation of GitHub 404 and 403 errors into API responses.
+
+Why it is useful compared with manually using GitHub:
+- It retains historical snapshots rather than showing only the current GitHub page.
+- It calculates a repeatable health score.
+- It gives each user a watchlist and dashboard-oriented response.
+- It refreshes tracked repositories automatically once per hour.
+- It creates a backend boundary where caching, alerts, richer analytics, or a frontend could later be added.
+
+30-SECOND INTERVIEW EXPLANATION
+-------------------------------
+GitMetrics is a Spring Boot REST API for monitoring GitHub repositories. An authenticated user can register, log in, track a repository URL, add it to a watchlist, and retrieve dashboard data. The backend calls the GitHub REST API through Spring RestClient, maps the response into a DTO, calculates a health score from stars, forks, and open issues, and stores timestamped snapshots in PostgreSQL through JPA. A scheduled service refreshes repositories hourly, and JWTs protect all endpoints except registration and login.
+
+1-MINUTE EXPLANATION
+---------------------
+I built GitMetrics as a layered Spring Boot application. Controllers expose repository and user endpoints, services contain the application logic, Spring Data repositories access PostgreSQL, and JPA entities model users, repositories, snapshots, and the many-to-many watchlist relationship. GitHubService calls api.github.com, stores a repository if necessary, saves a snapshot, and calculates health and trend data through AnalysisService. Authentication uses BCrypt for passwords and signed JWTs in a stateless Spring Security filter chain. The application is packaged with Maven and can run in a two-stage Java 21 Docker image. The current implementation is a backend API rather than a complete web application.
+
+2-3 MINUTE EXPLANATION
+-----------------------
+The application starts at GitMetricsApplication, where Spring Boot auto-configuration and scheduling are enabled. Incoming HTTP requests are handled by GitHubController or UserController. SecurityConfig permits only registration and login without authentication; all other requests are stateless and pass through JwtFilter. During login, AuthenticationManager uses MyUserDetailsService and UserRepo to load the user, DaoAuthenticationProvider checks the BCrypt password, and JWTService creates a token containing the email as the subject. On later calls, JwtFilter extracts a Bearer token, validates its signature and expiry, loads the user, and puts a UsernamePasswordAuthenticationToken into Spring Security's SecurityContext.
+
+For repository operations, GitHubService normalizes the submitted URL enough to extract owner and repository path, calls GitHub's GET /repos/{owner}/{repo} endpoint, deserializes the result into GitHubResponse, and either finds an existing github entity by URL or persists a new one. It calculates (stars + 2 * forks) / (open issues + 1), stores a snap entity with capturedAt, and uses the two newest snapshots to produce a growth string. UserService reuses this workflow when adding a repository to a watchlist and builds dashboard responses from the user's repositories and their latest snapshots. SyncService performs the same tracking workflow once every hour for every stored repository.
+
+This design is a conventional layered monolith. It is simple to deploy and understand, and PostgreSQL is appropriate for relationships and historical records. The main limitations are limited validation and exception handling, synchronous external calls, no GitHub authentication token, no frontend, only a context-load test, and a fallback JWT secret in configuration that should not be used in production.
+
+2. TECHNOLOGY STACK
+====================
+
+Java 21
+- What: The language/runtime target declared by pom.xml and used by the Docker build image.
+- Where: All application classes; maven-compiler configuration inherits the Java version property.
+- Why useful: Modern language/runtime support and long-term maintainability.
+- Actual status: Java 21 is configured; no special Java 21 feature is required by the visible source.
+
+Spring Boot 3.5.4
+- What: The application framework and dependency-management parent.
+- Where: GitMetricsApplication, auto-configuration, embedded web server, bean discovery.
+- Why useful: Fast setup of a runnable production-style Java service and integration of MVC, security, JPA, and configuration.
+
+Maven and Maven Wrapper
+- What: Build and dependency tool.
+- Where: pom.xml, mvnw, mvnw.cmd, and .mvn/wrapper/maven-wrapper.properties.
+- Why useful: Repeatable dependency resolution and builds across machines.
+- Build command represented by Dockerfile: mvn clean package -DskipTests.
+
+Spring Web / REST MVC
+- What: HTTP endpoint and JSON serialization framework.
+- Where: @RestController, @RequestMapping, @GetMapping, @PostMapping, @RequestParam, @RequestBody.
+- Why useful: Exposes a simple client-independent API.
+
+Spring Data JPA and Hibernate
+- What: Object-relational persistence abstraction and JPA implementation.
+- Where: @Entity classes, JpaRepository interfaces, derived query methods, @Transactional methods.
+- Why useful: Reduces CRUD and query boilerplate and maps Java relationships to relational tables.
+
+PostgreSQL
+- What: Relational database driver included at runtime.
+- Where: org.postgresql dependency and PostgreSQL Hibernate dialect.
+- Why useful: Relational joins fit users, repositories, snapshots, and the user_watchlists join table.
+- Actual connection properties: the sample datasource URL, username, and password are commented out. A working environment must provide datasource settings elsewhere. Exact runtime database configuration is NOT EVIDENT FROM THE CODE.
+
+GitHub REST API
+- What: External service providing repository metadata.
+- Where: GitHubService uses RestClient with base URL https://api.github.com and GET /repos/{owner}/{repo}.
+- Why useful: It is the source of current public repository counts.
+
+Spring RestClient
+- What: Synchronous HTTP client supplied by Spring.
+- Where: AppConfig creates a RestClient bean; GitHubService injects it.
+- Why useful: Centralizes the base URL and headers and provides readable request code.
+
+Spring Security
+- What: Authentication and authorization framework.
+- Where: SecurityConfig, JwtFilter, MyUserDetailsService, UserPrincipal.
+- Why useful: Integrates credential verification, request filtering, and SecurityContext handling.
+
+JJWT 0.11.5
+- What: JWT creation and parsing library.
+- Where: JWTService.
+- Why useful: Creates signed, expiring bearer tokens without server-side HTTP sessions.
+
+BCrypt
+- What: Slow password hashing algorithm.
+- Where: SecurityConfig's DaoAuthenticationProvider and UserService's registration encoder, both configured with strength 12.
+- Why useful: Passwords are not stored as plaintext.
+
+Lombok
+- What: Compile-time annotation processor.
+- Where: Entities use @Data, constructors, @Builder, and related annotations.
+- Why useful: Removes repetitive accessors and constructors.
+
+Docker
+- What: Container packaging technology.
+- Where: Dockerfile.
+- Why useful: Produces a consistent Java runtime image and exposes port 8080.
+
+NOT USED / CURRENTLY NOT IMPLEMENTED
+------------------------------------
+- No pgvector dependency, vector column, embedding generation, or similarity search.
+- No AI/ML model or embedding service.
+- No OAuth login.
+- No GitHub personal access token or GitHub API authentication header.
+- No Azure, AWS, or GCP deployment configuration.
+- No frontend framework or static application implementation.
+- No GraphQL endpoint.
+
+3. HIGH-LEVEL SYSTEM ARCHITECTURE
+==================================
+
+Actual architecture:
+
+  REST client / future frontend
+              |
+              | HTTP JSON requests
+              v
+  Spring Security filter chain
+       |                  |
+       | public           | protected Bearer JWT
+       v                  v
+  UserController     GitHubController / UserController
+       |                  |
+       +---------> Service layer <---------+
+                    |       |        |
+                    |       |        +--> AnalysisService
+                    |       |
+                    |       +-----------> GitRepo / SnapRepo / UserRepo
+                    |                         |
+                    |                         v
+                    |                    PostgreSQL
+                    |
+                    +------------------> GitHub REST API
+
+  Scheduled SyncService --hourly--> GitHubService
+
+Components:
+- Client: No frontend is present. Any HTTP client can call the REST API.
+- Security filter: JwtFilter validates bearer JWTs before protected controllers execute.
+- Controllers: Translate HTTP input into service calls and return JSON.
+- Services: Implement registration, authentication coordination, GitHub retrieval, analytics, dashboard assembly, and scheduled synchronization.
+- DTOs: GitHubResponse maps the external GitHub response; RepoAnalysisResponse is the application analysis response.
+- Models/entities: User, github, and snap are JPA persistence models. UserPrincipal is a Spring Security adapter, not a database entity.
+- Repositories: Spring Data interfaces persist and query entities.
+- Database: Relational persistence for users, tracked repositories, snapshots, and watchlist links.
+- External API: GitHub repository metadata endpoint.
+- Exception handler: GlobalExceptionHandler maps selected HttpClientErrorException types to JSON error responses.
+- Configuration: AppConfig creates the GitHub RestClient; SecurityConfig creates security beans; application.properties controls port, JPA behavior, and JWT configuration.
+
+There is no separate frontend-to-backend build, message broker, cache, vector database, or microservice boundary in the repository.
+
+4. REQUEST LIFECYCLE / END-TO-END FLOW
+=======================================
+
+PRIMARY FLOW: POST /github/track?url=https://github.com/spring-projects/spring-boot
+
+  Client
+    |
+    | POST /github/track?url=...
+    v
+  SecurityConfig / JwtFilter
+    |
+    | JWT required because only register/login are public
+    v
+  GitHubController.trackRepo(String url)
+    |
+    v
+  GitHubService.githubresponse(String url)
+    |
+    | extractPath(url) -> owner/repository
+    v
+  RestClient GET /repos/{owner}/{repo}
+    |
+    v
+  GitHubResponse record
+    |
+    +--> GitRepo.findByUrl(url)
+    |       +--> existing github entity
+    |       +--> or save a new github entity
+    |
+    +--> AnalysisService.calculateHealthScore(stars, forks, issues)
+    |
+    +--> build snap with capturedAt and repository relation
+    |
+    +--> SnapRepo.save(snapshot)
+    |
+    +--> load newest two snapshots and calculate trend
+    v
+  GitHubResponse serialized as JSON
+    |
+    v
+  HTTP 200 response
+
+Important accuracy: the track method returns GitHubResponse, not RepoAnalysisResponse. The calculated trend is printed to standard output in GitHubService but is not included in the track response.
+
+FLOW 2: LOGIN
+POST /github/users/login with a User JSON body.
+1. UserController.login receives the body.
+2. UserService.verify creates UsernamePasswordAuthenticationToken with email and submitted password.
+3. AuthenticationManager delegates to DaoAuthenticationProvider.
+4. MyUserDetailsService loads the user with UserRepo.findByEmail.
+5. BCrypt compares the submitted password with the stored hash.
+6. If authenticated, JWTService.generateToken uses the email as subject and creates a token that expires after ten hours.
+7. The controller returns {"token":"<JWT>"}.
+
+FLOW 3: ADD TO WATCHLIST
+POST /github/users/watchlist?url=... with Authorization: Bearer <JWT>.
+1. JwtFilter validates the token and sets the SecurityContext.
+2. UserController obtains authentication.getName(), which is the email from the JWT subject.
+3. UserService.addRepoToWatchlist loads the User.
+4. It calls GitHubService.githubresponse, which fetches current data and creates a repository/snapshot if needed.
+5. It looks up the repository with GitRepo.findByUrl.
+6. It adds the repository to User.watchlists and saves the user.
+7. The many-to-many relationship is written through user_watchlists.
+8. The controller returns a success message.
+
+FLOW 4: DASHBOARD
+GET /github/users/dashboard with a valid JWT.
+1. JwtFilter authenticates the request.
+2. UserController gets the authenticated email.
+3. UserService.getUserDashboard loads the user and lazily accesses watchlists inside a read-only transaction.
+4. For every watched github entity, SnapRepo loads up to two newest snapshots.
+5. The newest values become stars, forks, issues, and healthScore; empty history produces zeros.
+6. AnalysisService creates a trend string.
+7. UserService returns a list of RepoAnalysisResponse records.
+
+FLOW 5: HOURLY SYNC
+1. @EnableScheduling activates scheduled jobs.
+2. SyncService.syncData runs at cron 0 0 * * * *, at the start of every hour.
+3. GitRepo.findAll loads all repositories.
+4. For each repository, GitHubService.githubresponse fetches current GitHub data and saves a new snapshot.
+5. Each repository is isolated by a try/catch, so one failure does not stop the loop.
+6. Status is written with System.out.println.
+
+5. HOW USERS GIVE INPUT
+========================
+
+General rules:
+- Query parameters are used for repository URLs: url.
+- JSON request bodies are used for User registration and login.
+- Protected requests need Authorization: Bearer <JWT>.
+- There are no path variables in the controllers.
+- There are no documented optional parameters. url is required by the Java method signature and Spring request binding.
+- JSON validation annotations such as @Valid, @NotBlank, and @Email are absent.
+
+REGISTER
+METHOD: POST
+ENDPOINT: /github/users/register
+INPUT: JSON User body with email, password, and optionally name. id and watchlists should not be supplied by a normal client.
+HEADERS: Content-Type: application/json. No JWT required.
+REQUEST BODY:
+{"email":"alex@example.com","password":"example-password","name":"Alex"}
+EXAMPLE REQUEST:
+curl -X POST http://localhost:8080/github/users/register -H "Content-Type: application/json" -d "{\"email\":\"alex@example.com\",\"password\":\"example-password\",\"name\":\"Alex\"}"
+WHAT HAPPENS: UserController calls UserService.register. The service checks existsByEmail, hashes the password with BCrypt strength 12, and saves the entity.
+EXAMPLE RESPONSE: A serialized User entity containing id, email, name, and watchlists. The current controller returns the entity directly.
+POSSIBLE ERRORS: Duplicate email throws a generic RuntimeException; no dedicated handler maps it. Missing or malformed fields are not Bean Validation errors because validation is absent. Returning the entity can expose the stored password hash.
+
+LOGIN
+METHOD: POST
+ENDPOINT: /github/users/login
+INPUT: JSON User body; email and password are used.
+HEADERS: Content-Type: application/json. No JWT required.
+REQUEST BODY:
+{"email":"alex@example.com","password":"example-password"}
+EXAMPLE REQUEST:
+curl -X POST http://localhost:8080/github/users/login -H "Content-Type: application/json" -d "{\"email\":\"alex@example.com\",\"password\":\"example-password\"}"
+WHAT HAPPENS: AuthenticationManager verifies credentials through UserRepo and BCrypt. JWTService creates a ten-hour signed token.
+EXAMPLE RESPONSE: {"token":"<JWT>"}
+POSSIBLE ERRORS: Invalid credentials are intended to produce HTTP 401 from the controller, although the authentication provider may throw before the string "Fail" branch is reached. Invalid JWT parsing is not handled by GlobalExceptionHandler.
+
+TRACK REPOSITORY
+METHOD: POST
+ENDPOINT: /github/track?url=https://github.com/owner/repository
+INPUT: Required query parameter url. The implementation expects a GitHub-style URL containing owner and repository segments.
+HEADERS: Authorization: Bearer <JWT>; no GitHub token header is added by GitMetrics.
+REQUEST BODY: None.
+WHAT HAPPENS: GitHubController.trackRepo calls GitHubService.githubresponse. The service calls GitHub, persists repository and snapshot data, and returns GitHubResponse.
+EXAMPLE RESPONSE:
+{"name":"spring-boot","stars":...,"forks":...,"issues":...,"owner":{"login":"spring-projects"}}
+POSSIBLE ERRORS: GitHub 404 and 403 are handled by GlobalExceptionHandler. Empty, malformed, or non-GitHub URLs can cause array-index or other runtime failures. A duplicate URL is found by the unique URL lookup. No retry or timeout policy is visible.
+
+ANALYZE REPOSITORY
+METHOD: GET
+ENDPOINT: /github/analysis?url=https://github.com/owner/repository
+INPUT: Required query parameter url.
+HEADERS: Authorization: Bearer <JWT>.
+REQUEST BODY: None.
+WHAT HAPPENS: GitHubController calls GitHubService.getRepoAnalysis. It fetches current GitHub data, requires a pre-existing local repository with GitRepo.findByUrl(url), loads two snapshots, calculates current health and trend, and returns RepoAnalysisResponse.
+EXAMPLE RESPONSE:
+{"name":"spring-boot","owner":"spring-projects","stars":100,"forks":50,"issues":10,"healthScore":18.18,"growthTrend":"Growth: 4.25% compared to previous check."}
+POSSIBLE ERRORS: If the repository was never tracked, or the exact URL differs from the stored URL, orElseThrow produces an unhandled exception. GitHub 404/403 are translated by the global handler.
+
+ADD WATCHLIST
+METHOD: POST
+ENDPOINT: /github/users/watchlist?url=https://github.com/owner/repository
+INPUT: Required url query parameter.
+HEADERS: Authorization: Bearer <JWT>.
+REQUEST BODY: None.
+WHAT HAPPENS: The authenticated email identifies the user. UserService fetches the repository through GitHubService, obtains the local entity, adds it to the Set, and saves the user.
+EXAMPLE RESPONSE: {"message":"Repository added to watchlist successfully."}
+POSSIBLE ERRORS: Missing/invalid JWT, invalid repository URL, GitHub failure, missing local user, or persistence failure. There is no explicit duplicate-watchlist response; Set semantics normally avoid duplicate links.
+
+DASHBOARD
+METHOD: GET
+ENDPOINT: /github/users/dashboard
+INPUT: No body or query parameters.
+HEADERS: Authorization: Bearer <JWT>.
+REQUEST BODY: None.
+WHAT HAPPENS: UserService loads the authenticated user's watchlist and up to two snapshots per repository, then returns a list of RepoAnalysisResponse.
+EXAMPLE RESPONSE:
+[{"name":"spring-boot","owner":"spring-projects","stars":100,"forks":50,"issues":10,"healthScore":18.18,"growthTrend":"Not enough data to calculate growth yet."}]
+POSSIBLE ERRORS: Unauthenticated request, unknown user, lazy-loading/persistence failure, or database failure. An empty watchlist returns an empty JSON array.
+
+6. API DOCUMENTATION
+=====================
+
+HTTP Method | Endpoint | Purpose | Input | Output | Authentication
+POST | /github/users/register | Create user | User JSON | User JSON | No
+POST | /github/users/login | Verify credentials | User JSON | token JSON | No
+POST | /github/track | Fetch and store repository metrics | url query parameter | GitHubResponse JSON | Yes
+GET | /github/analysis | Return repository analysis | url query parameter | RepoAnalysisResponse JSON | Yes
+POST | /github/users/watchlist | Add repository to current user's watchlist | url query parameter | message JSON | Yes
+GET | /github/users/dashboard | Return watched repository analysis | JWT only | list of RepoAnalysisResponse | Yes
+
+GitHubResponse fields:
+- name: GitHub repository name.
+- stars: mapped from stargazers_count.
+- forks: mapped from forks_count.
+- issues: mapped from open_issues_count.
+- owner.login: GitHub owner login.
+
+RepoAnalysisResponse fields:
+- name, owner, stars, forks, issues.
+- healthScore: calculated numeric score.
+- growthTrend: human-readable string or not-enough-data message.
+
+There is no OpenAPI/Swagger configuration visible, so the table above is manually derived from the controllers.
+
+7. AUTHENTICATION AND AUTHORIZATION
+====================================
+
+Simple explanation:
+GitMetrics has its own account system. A user registers with email and password. The password is hashed before storage. On login, the backend returns a signed JWT. The client sends that token on protected requests. The backend validates it and uses the email inside it to identify the user.
+
+Technical trace:
+1. SecurityConfig permits /github/users/register and /github/users/login.
+2. It requires authentication for every other request.
+3. It disables CSRF and sets SessionCreationPolicy.STATELESS.
+4. JwtFilter runs before UsernamePasswordAuthenticationFilter.
+5. JwtFilter reads Authorization and requires the Bearer prefix.
+6. JWTService extracts the subject and verifies the HMAC signature using the configured Base64 secret.
+7. MyUserDetailsService loads User by email through UserRepo.
+8. validateToken checks subject equality and expiration.
+9. A UsernamePasswordAuthenticationToken is placed in SecurityContextHolder.
+10. Controller Authentication.getName() returns the email.
+
+Authentication answers:
+- JWTs: Yes.
+- Sessions: Server-side sessions are disabled; the application is stateless.
+- OAuth: CURRENTLY NOT IMPLEMENTED.
+- GitHub token: CURRENTLY NOT IMPLEMENTED. GitMetrics accesses GitHub with only Accept and User-Agent headers.
+- API key: No application API-key mechanism is evident.
+- Token storage: The backend returns the JWT. Client-side storage is NOT EVIDENT FROM THE CODE.
+- Token passed to GitHub: It is not. The GitMetrics JWT authenticates the caller to GitMetrics, not to GitHub.
+- Authorization: Every non-public endpoint requires authenticated access, but no endpoint-specific roles or ownership checks are implemented. UserPrincipal always grants "USER".
+
+Authentication means proving identity. Authorization means deciding what an authenticated identity may do. This code implements basic authorization at the endpoint level, but not role-based authorization or fine-grained resource policies.
+
+Security observations:
+- The JWT secret is configurable through JWT_SECRET, but application.properties also contains a fallback literal secret. Do not reproduce it or use it in production.
+- The database password appears in commented configuration. It is still sensitive source material and should be removed and rotated if it was ever real.
+- RECOMMENDED IMPROVEMENT: Require JWT_SECRET with no source-controlled fallback.
+- RECOMMENDED IMPROVEMENT: Use an external secret manager and rotate keys.
+- RECOMMENDED IMPROVEMENT: Return a safe registration DTO rather than User, so the password hash cannot be serialized.
+- RECOMMENDED IMPROVEMENT: Add explicit exception handling for malformed, expired, and invalid JWTs.
+- RECOMMENDED IMPROVEMENT: Add refresh-token or short-lived-token policy if long sessions are required.
+- RECOMMENDED IMPROVEMENT: Add roles/authorities only if actual authorization requirements need them.
+
+8. GITHUB API INTEGRATION
+==========================
+
+Configuration:
+- Base URL: https://api.github.com in AppConfig.
+- Default headers: Accept: application/json and User-Agent: GitMetrics-App.
+- Client: one Spring RestClient bean.
+
+Calls:
+- HTTP GET /repos/{owner}/{repo} in GitHubService.githubresponse.
+- HTTP GET /repos/{owner}/{repo} in GitHubService.getRepoAnalysis.
+- Owner and repository are extracted from the submitted URL by extractPath.
+
+Parsing:
+GitHubResponse is a Java record. Jackson maps GitHub's stargazers_count, forks_count, and open_issues_count into stars, forks, and issues through @JsonProperty. The nested Owner record maps the login.
+
+There is no:
+- GitHub OAuth flow.
+- GitHub Authorization header.
+- Pagination, because the only endpoint returns one repository resource.
+- Retry, backoff, circuit breaker, cache, timeout, or bulkhead configuration evident in the code.
+- Explicit handling of GitHub API 500 or network errors.
+
+GitMetrics backend versus GitHub API:
+- GitHub owns current public repository metadata.
+- GitMetrics owns user accounts, watchlists, health calculation, snapshots, and dashboard responses.
+- GitMetrics calls GitHub synchronously during tracking, analysis, watchlist addition, and scheduled synchronization.
+
+REST client choice is reasonable for a small synchronous integration because it keeps the call readable and the base URL/header setup centralized. RECOMMENDED IMPROVEMENT: configure timeouts and resilience policies.
+
+9. DATABASE ARCHITECTURE
+=========================
+
+Database type:
+- PostgreSQL runtime driver is included.
+- Hibernate dialect is PostgreSQLDialect.
+- Hibernate ddl-auto is update, so Hibernate may update schema based on entities at startup.
+- Exact active datasource URL/credentials are not configured in the visible active properties; the local examples are commented out.
+
+Entities and likely tables:
+
+users (User)
+- id: generated identity primary key.
+- email: non-null and unique.
+- password: non-null BCrypt hash.
+- name: nullable string.
+- watchlists: many-to-many association.
+
+ github_repos (github)
+- id: generated identity primary key.
+- name: non-null.
+- repoName: non-null.
+- url: non-null and unique.
+- owner: non-null.
+- snapshots: one-to-many relationship to snap, cascade all, orphan removal.
+- users: inverse side of many-to-many, hidden from JSON with @JsonIgnore.
+
+snap (table name is implicit from the entity/table annotation)
+- id: generated identity primary key.
+- stars, forks, openIssues: integer metrics.
+- healthScore: double.
+- capturedAt: non-null LocalDateTime.
+- repo_id: many-to-one foreign-key column to github_repos.
+
+user_watchlists
+- user_id join column to users.
+- repo_id inverse join column to github_repos.
+- Created by User.watchlists @JoinTable.
+
+Relationships:
+- User many-to-many github through user_watchlists.
+- github one-to-many snap.
+- snap many-to-one github with lazy fetch.
+- github has a many-to-many inverse users set.
+
+Repositories and queries:
+- UserRepo.findByEmail and existsByEmail.
+- GitRepo.findByUrl.
+- SnapRepo.findByGitHubOrderByCapturedAtDesc(github, Pageable), called with PageRequest.of(0, 2).
+- JpaRepository supplies basic CRUD and findAll.
+
+Transactions:
+- UserService.addRepoToWatchlist is @Transactional.
+- UserService.getUserDashboard is @Transactional(readOnly = true).
+- Other service methods do not declare transaction annotations; repository operations still use Spring Data transactions internally.
+
+Indexes and migrations:
+- Unique constraints on user email and repository URL are declared.
+- No explicit @Index annotations or SQL migration files are present.
+- No Flyway or Liquibase dependency is present.
+- Schema evolution through ddl-auto=update is convenient for development but is not ideal for controlled production migrations.
+
+Vector database status:
+CURRENTLY NOT IMPLEMENTED. There is no pgvector dependency, vector column, embedding generation, vector dimension, similarity query, or vector database. There is therefore no vector flow to explain.
+
+10. CODE STRUCTURE
+===================
+
+com.example.GitMetrics
+- GitMetricsApplication: application entry point and scheduling enablement.
+
+config/
+- AppConfig: creates the GitHub RestClient bean.
+- SecurityConfig: defines filter chain, public endpoints, stateless policy, authentication provider, and AuthenticationManager.
+- JwtFilter: extracts and validates JWTs for each request.
+
+controller/
+- GitHubController: repository tracking and analysis HTTP endpoints.
+- UserController: registration, login, watchlist, and dashboard endpoints.
+
+service/
+- GitHubService: GitHub API integration, repository persistence, snapshot creation, and analysis response construction.
+- UserService: user lifecycle, authentication coordination, watchlist updates, and dashboard assembly.
+- AnalysisService: health and growth formulas.
+- JWTService: JWT creation, parsing, subject extraction, and expiry checks.
+- MyUserDetailsService: loads users for Spring Security.
+- SyncService: hourly repository refresh.
+
+repo/
+- UserRepo: User persistence queries.
+- GitRepo: github persistence and URL lookup.
+- SnapRepo: snapshot persistence and newest-snapshot query.
+
+dto/
+- GitHubResponse: external GitHub JSON shape.
+- RepoAnalysisResponse: application analysis JSON shape.
+
+model/
+- User: account entity and watchlist owner.
+- github: repository entity. The lowercase class name is the actual code name.
+- snap: snapshot entity. The lowercase class name is the actual code name.
+- UserPrincipal: adapts User to Spring Security UserDetails.
+
+exception/
+- GlobalExceptionHandler: @RestControllerAdvice for GitHub NotFound and Forbidden exceptions.
+
+resources/
+- application.properties: application name, JPA settings, port, and JWT setting.
+
+Tests:
+- GitMetricsApplicationTests: one @SpringBootTest contextLoads test.
+
+11. DESIGN PATTERNS AND ARCHITECTURAL PRINCIPLES
+=================================================
+
+Layered architecture
+- Used by controller, service, repo, model, and configuration packages.
+- Separates HTTP handling, application logic, persistence, and configuration.
+- Useful for explaining request flow and keeping controllers thin.
+
+MVC-style web architecture
+- Controllers handle requests and responses, services act as application logic, and model classes represent data.
+- This is a REST adaptation of the MVC separation.
+
+Dependency injection / Inversion of Control
+- Spring injects UserService, GitHubService, repositories, RestClient, and security components with @Autowired.
+- Beans are created by Spring and wired by type.
+- It avoids manually constructing dependencies and improves testability, although constructor injection would be clearer.
+
+Repository pattern
+- GitRepo, UserRepo, and SnapRepo abstract persistence behind interfaces extending JpaRepository.
+- Derived query names express database queries without handwritten SQL.
+
+DTO pattern
+- GitHubResponse prevents the external GitHub response shape from being used as a JPA entity.
+- RepoAnalysisResponse exposes the application result shape.
+- The registration endpoint currently bypasses a safe output DTO by returning User directly.
+
+Builder pattern
+- snap.builder() constructs a snapshot with multiple fields clearly in GitHubService.
+- Lombok generates the builder.
+
+Singleton-like Spring beans
+- AppConfig's RestClient and annotated services are managed beans, normally one instance per application context by default.
+- This is a Spring bean scope rather than a manually implemented singleton.
+
+Strategy pattern
+CURRENTLY NOT EVIDENT as a deliberate pattern. AnalysisService contains fixed formulas; there is no interchangeable strategy interface.
+
+Factory pattern
+CURRENTLY NOT EVIDENT as an application pattern. Spring internally creates beans, but the project does not implement a factory abstraction.
+
+12. SPRING BOOT EXPLANATION
+============================
+
+@SpringBootApplication on GitMetricsApplication combines configuration, component scanning, and auto-configuration. Spring discovers @RestController, @Service, @Repository, @Component, and @Configuration classes under the root package.
+
+@RestController marks GitHubController and UserController as HTTP controllers whose return values are serialized to JSON.
+
+@RequestMapping establishes controller prefixes. @PostMapping and @GetMapping connect HTTP methods and paths to Java methods.
+
+@Service marks application classes such as GitHubService and UserService as injectable business-layer beans.
+
+@Repository marks Spring Data repository interfaces. Spring creates implementations at runtime.
+
+@Component marks JwtFilter for component scanning.
+
+@Configuration marks AppConfig and SecurityConfig as bean configuration classes.
+
+@Bean explicitly creates RestClient, SecurityFilterChain, AuthenticationProvider, and AuthenticationManager objects.
+
+@Autowired requests dependency injection by field. RECOMMENDED IMPROVEMENT: use constructor injection, which makes dependencies explicit and fields final.
+
+application.properties supplies values such as spring.application.name, JPA behavior, server.port, and jwt.secret. `${PORT:8080}` means use PORT if present, otherwise 8080. `${JWT_SECRET:...}` means use JWT_SECRET if present, otherwise the source-controlled fallback; this fallback is a security weakness.
+
+Spring Boot runs an embedded servlet server, so the packaged JAR can start with java -jar. Docker starts that JAR on the configured port.
+
+13. ERROR HANDLING
+===================
+
+Implemented global handling:
+- HttpClientErrorException.NotFound -> HTTP 404 with {"error":"Repository not found on GitHub."}.
+- HttpClientErrorException.Forbidden -> HTTP 403 with {"error":"GitHub API rate limit exceeded."}.
+
+Controller-level login response:
+- UserController intends to return HTTP 401 with an error map when verification returns "Fail".
+- AuthenticationManager commonly throws an authentication exception for bad credentials, and GlobalExceptionHandler does not handle it. Exact runtime response depends on Spring Security behavior; a dedicated authentication handler is RECOMMENDED.
+
+Unhandled or weakly handled cases:
+- Duplicate registration throws RuntimeException("Email already in use") with no custom mapping.
+- Missing user throws RuntimeException("User not found").
+- Missing tracked repository in analysis uses orElseThrow with no specific exception.
+- Malformed repository URL can cause runtime failures from parts[0]/parts[1].
+- Invalid JWT parsing/expiry exceptions are not mapped by GlobalExceptionHandler.
+- Database failures are not mapped.
+- Network errors and GitHub 5xx responses are not explicitly handled.
+- No validation error response exists because Bean Validation is not configured or used.
+
+RECOMMENDED IMPROVEMENT: create domain exceptions and a complete @RestControllerAdvice that returns consistent error bodies, correlation IDs, and safe messages for 400, 401, 403, 404, 409, 429, and 500 cases.
+
+14. INPUT VALIDATION
+=====================
+
+What is currently validated:
+- SecurityConfig requires authentication for protected endpoints.
+- UserService checks duplicate email with existsByEmail.
+- GitHubService performs basic string replacement and segment extraction.
+- Database constraints require some entity fields to be non-null and unique.
+
+What is not validated:
+- No @Valid on request bodies.
+- No @Email, @NotBlank, @Size, or password policy annotations.
+- No explicit URL parser or allowlist for GitHub URLs.
+- No explicit check that owner and repository segments exist before indexing.
+- No length limits or content validation.
+
+RECOMMENDED IMPROVEMENT:
+- Add request DTOs such as RegisterRequest, LoginRequest, and RepositoryRequest.
+- Add @Valid and Jakarta Validation annotations.
+- Use a URI parser and require an allowed GitHub host.
+- Return HTTP 400 for malformed input.
+- Keep persistence entities out of input contracts.
+
+15. CONFIGURATION
+==================
+
+spring.application.name=GitMetrics
+- Application name is GitMetrics.
+
+spring.jpa.hibernate.ddl-auto=update
+- Hibernate updates schema at startup. Useful for development; risky for production migration control.
+
+spring.jpa.show-sql=true
+- SQL statements are logged. Useful for debugging; potentially noisy and sensitive in production.
+
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
+- Tells Hibernate to generate PostgreSQL-compatible SQL.
+
+server.port=${PORT:8080}
+- Uses PORT environment variable or 8080 by default.
+
+jwt.secret=${JWT_SECRET:<redacted fallback>}
+- Uses JWT_SECRET if supplied, otherwise a fallback literal exists in source. The actual value is intentionally omitted from this guide.
+
+Commented datasource properties:
+- A local PostgreSQL URL, username, and password are present as comments. Their exact values are not reproduced here. They should be removed from source if real, rotated if exposed, and supplied through environment/secret management.
+
+GitHub configuration:
+- The GitHub API URL and default headers are hardcoded in AppConfig, not properties.
+- No GitHub credential property exists.
+
+RECOMMENDED IMPROVEMENT: move database URL, database username, database password, GitHub base URL, timeouts, and JWT settings into environment-specific configuration and secret management.
+
+16. DOCKER
+===========
+
+Dockerfile flow:
+1. Build stage starts from maven:3.9.9-eclipse-temurin-21.
+2. WORKDIR is /app.
+3. pom.xml and Maven wrapper files are copied first.
+4. mvn dependency:go-offline prefetches dependencies, improving layer reuse.
+5. src is copied.
+6. mvn clean package -DskipTests creates the JAR without running tests.
+7. Runtime stage starts from eclipse-temurin:21-jdk.
+8. The generated target/*.jar is copied to /app/app.jar.
+9. Port 8080 is documented with EXPOSE 8080.
+10. ENTRYPOINT runs java -jar app.jar.
+
+Source -> Maven build -> JAR -> Docker image -> container -> running Spring Boot application.
+
+Docker does not provide a database container, environment file, health check, non-root user, or production orchestration configuration in this repository. The runtime image is a JDK image rather than a minimal JRE image.
+
+RECOMMENDED IMPROVEMENT: run as a non-root user, use a smaller runtime image where appropriate, add a health check, pass secrets at runtime, and run tests in CI even though the image build skips them.
+
+17. DEPLOYMENT / AZURE
+======================
+
+Currently implemented:
+- Docker packaging.
+- Port 8080 default.
+- PORT and JWT_SECRET environment-variable placeholders.
+- PostgreSQL driver and dialect.
+
+CURRENTLY NOT IMPLEMENTED:
+- Azure App Service, Azure Container Apps, AKS, Azure Database for PostgreSQL, Terraform, Bicep, GitHub Actions, cloud networking, managed identity, or deployment manifests.
+- Any AWS or GCP deployment.
+
+A possible future deployment, explicitly a RECOMMENDED IMPROVEMENT, would be:
+- Compute: Azure Container Apps or App Service running the Docker image.
+- Database: Azure Database for PostgreSQL with private networking where possible.
+- Secrets: Azure Key Vault and managed identity rather than source configuration.
+- Networking: HTTPS ingress, restricted database access, and outbound access to api.github.com.
+- Configuration: PORT, JDBC URL, database username/password, and JWT secret supplied through deployment configuration.
+- Scalability: multiple stateless application replicas, external PostgreSQL, scheduled-job coordination, and rate-limit-aware synchronization.
+
+The current in-process @Scheduled job would need coordination if multiple replicas run, otherwise every replica may synchronize every repository.
+
+18. SECURITY
+=============
+
+Implemented protections:
+- BCrypt password hashing.
+- JWT signature and expiry checks.
+- Stateless protected endpoints.
+- No GitHub credentials are sent or stored by this application.
+- JPA derived queries reduce direct SQL string construction; no SQL injection through handwritten query concatenation is evident.
+- CSRF is disabled, which is common for stateless bearer APIs but requires careful token handling.
+
+Risks and gaps:
+- Source-controlled fallback JWT secret.
+- Commented database credentials.
+- User entity returned from registration can expose the password hash.
+- No DTO validation.
+- No URL host validation.
+- No explicit CORS configuration. Browser cross-origin behavior is NOT EVIDENT FROM THE CODE.
+- No explicit HTTPS configuration. HTTPS must be provided by deployment infrastructure; not evident in this repository.
+- show-sql=true can expose query details in logs.
+- System.out.println is used for trend and sync logs; structured logging and redaction are absent.
+- No rate limiting for GitMetrics clients.
+- No GitHub authenticated API token, so public API limits apply.
+- No explicit authorization beyond authenticated-user access.
+- No security headers or custom authentication failure handlers visible.
+- No audit logging.
+
+RECOMMENDED IMPROVEMENTS: remove/rotate exposed secrets, require environment secrets, use safe response DTOs, validate inputs, handle JWT failures, configure HTTPS/CORS intentionally, disable SQL logging in production, add structured redacted logs, add rate limiting, and add security tests.
+
+19. PERFORMANCE AND SCALABILITY
+===============================
+
+Current behavior:
+- GitHub calls are synchronous and block the request thread.
+- Every tracking, analysis, watchlist addition, and hourly sync can call GitHub.
+- Snapshots are appended; there is no retention policy.
+- Dashboard loads the watchlist, then queries snapshots per repository, which can become an N+1 query pattern.
+- Only two snapshots are requested for each repository.
+- No application cache is configured.
+- Spring Boot/JPA provides a database connection pool through its defaults, but no explicit pool tuning is present.
+- No pagination exists for watchlists, dashboards, or all repository synchronization.
+- No asynchronous queue is used.
+
+One user:
+- The synchronous flow is simple and likely adequate for small requests.
+- GitHub response latency directly affects the API response.
+
+One thousand users:
+- Concurrent requests can consume web threads while waiting for GitHub.
+- Repeated identical lookups can hit GitHub rate limits.
+- Dashboard query count grows with watchlist size.
+- Snapshot table grows indefinitely.
+- Multiple application replicas would duplicate hourly sync work.
+
+RECOMMENDED IMPROVEMENTS:
+- Cache current repository data with a short TTL.
+- Add GitHub conditional requests/ETags where supported.
+- Configure HTTP timeouts, retry with backoff for transient failures, and circuit breaking.
+- Queue scheduled synchronization and limit concurrency.
+- Coordinate scheduled jobs with a distributed lock when horizontally scaled.
+- Batch dashboard snapshot queries or use a projection query.
+- Add repository and capturedAt indexes and retention/archival policy.
+- Add pagination to dashboard/watchlist operations.
+- Use authenticated GitHub access where appropriate, respecting GitHub terms and rate limits.
+- Add metrics for latency, failure rate, API quota, and database timings.
+
+There is no vector-search performance consideration because vectors are CURRENTLY NOT IMPLEMENTED.
+
+20. TESTING
+===========
+
+Existing test:
+- GitMetricsApplicationTests is a @SpringBootTest with contextLoads(). It verifies that the Spring application context can start.
+
+CURRENTLY NOT IMPLEMENTED:
+- Unit tests for AnalysisService formulas.
+- GitHubService tests with a mocked RestClient.
+- UserService tests for registration, login, watchlists, and dashboard.
+- Controller tests with MockMvc.
+- Repository tests with a test database.
+- Security tests for valid, expired, malformed, missing, and wrong-signature JWTs.
+- Integration tests for GitHub error mapping.
+- Testcontainers PostgreSQL configuration.
+- Contract tests for GitHubResponse parsing.
+
+RECOMMENDED TEST PLAN:
+- AnalysisService: zero previous health, fewer than two snapshots, positive/negative growth, health formula.
+- UserService: password is hashed, duplicate email rejected, authentication produces token, watchlist relationship saved.
+- GitHubService: existing versus new repository, snapshot creation, URL parsing, GitHub 404/403, null body.
+- Controllers: status codes, JSON fields, required parameters, authentication boundaries.
+- Repositories: derived queries and newest-two ordering.
+- Security: public register/login and protected endpoints.
+- Integration: Testcontainers PostgreSQL plus a mocked GitHub HTTP server.
+
+Interview testing questions:
+- How would you test a synchronous external API call? Mock RestClient or use a local HTTP stub.
+- How would you verify password safety? Assert the stored value differs from plaintext and BCrypt matches it.
+- How would you test scheduling? Invoke the method directly for unit tests and use controlled integration scheduling only when necessary.
+- How would you test JPA relationships? Use an integration test with a real relational database.
+
+21. GIT AND VERSION CONTROL
+=============================
+
+Observed repository state:
+- Current branch: main.
+- Remote-tracking branch: origin/main.
+- Recent commits include initial project creation, Spring Security/JWT work, and Dockerization.
+- The worktree currently contains modifications to several source/config files and an untracked target_test-classes directory; these are existing worktree facts, not changes made for this guide.
+
+.gitignore excludes target output, IDE metadata, Maven wrapper JAR, and common IDE/build files. .dockerignore excludes target, .idea, .git, .gitignore, HELP.md, and IntelliJ module files.
+
+There is no visible branch strategy, pull-request policy, or CI pipeline configuration. Commit message conventions are NOT EVIDENT FROM THE CODE.
+
+Files that should never be committed:
+- Real database passwords.
+- JWT secrets.
+- GitHub tokens.
+- Environment files containing credentials.
+- IDE/build output where unnecessary.
+
+RECOMMENDED IMPROVEMENT: remove sensitive commented configuration, rotate any exposed values, add a safe application example configuration, and add CI for tests/build/security scanning.
+
+22. IMPORTANT TECHNICAL DECISIONS
+==================================
+
+Decision: REST API.
+Why: Controllers expose focused HTTP endpoints and JSON DTOs for client independence.
+Alternative: GraphQL or server-rendered MVC.
+Trade-off: REST is simple, but clients may require multiple calls and the response shapes are fixed.
+
+Decision: PostgreSQL/JPA.
+Why: Users, repositories, snapshots, and watchlist links are relational.
+Alternative: document database.
+Trade-off: relational constraints and joins are strong, but schema changes require migration discipline.
+
+Decision: GitHub REST API.
+Why: The required repository metrics are available from a single public endpoint.
+Alternative: GitHub GraphQL.
+Trade-off: REST is simpler here; GraphQL could select fields more flexibly but adds complexity.
+
+Decision: DTO records.
+Why: External API shape and analysis response are separate from database entities.
+Trade-off: Some mapping code is needed; direct entity exposure is avoided for those responses, although registration still exposes User directly.
+
+Decision: Layered monolith.
+Why: The project is small and the workflows share persistence and GitHub integration.
+Alternative: microservices.
+Trade-off: simple deployment and debugging versus less independent scaling.
+
+Decision: Synchronous GitHub calls.
+Why: The caller receives an immediate tracking/analysis result.
+Trade-off: request latency and API availability directly affect the user request.
+
+Decision: Hourly in-process scheduler.
+Why: It provides automatic refresh without a separate worker system.
+Trade-off: not coordinated across replicas and may create many API calls.
+
+Decision: Docker multi-stage build.
+Why: Separates Maven build dependencies from runtime application packaging.
+Trade-off: image builds are repeatable, but tests are skipped in the Docker build.
+
+pgvector decision: None. pgvector is not included or used.
+
+23. TRADE-OFFS
+==============
+
+REST versus GraphQL: GitMetrics currently uses REST because one repository resource and a few application operations are sufficient. GraphQL might reduce over-fetching for a richer dashboard but would add schema and resolver complexity.
+
+PostgreSQL versus NoSQL: PostgreSQL matches many-to-many watchlists and one-to-many snapshots. NoSQL could scale flexible documents but would make relational integrity and query relationships less natural.
+
+Synchronous versus asynchronous GitHub calls: synchronous behavior is easy to understand and gives an immediate result; asynchronous jobs would improve resilience and throughput but require job state and client polling or notifications.
+
+Caching versus always fetching fresh data: current analysis fetches current GitHub data, which reduces staleness but increases latency and rate-limit usage. A short cache would improve performance with controlled staleness.
+
+Monolith versus microservices: current monolith minimizes operational overhead. At large scale, GitHub ingestion and dashboard querying could be separated, but service boundaries and distributed consistency would cost complexity.
+
+Local/in-process scheduler versus external scheduler: current scheduling is simple; an external scheduler or distributed lock is safer with multiple replicas.
+
+JWT versus server sessions: JWTs fit stateless API deployment, but revocation is harder. Sessions simplify revocation but require shared session state when scaled.
+
+24. WHAT HAPPENS IF...
+=======================
+
+GitHub is down: RestClient throws a network/client exception. No retry or friendly general GitHub-unavailable handler is implemented. The request likely fails with a framework error; scheduled sync catches the exception per repository and continues. RECOMMENDED IMPROVEMENT: timeout, retry, circuit breaker, and 503 response.
+
+Repository does not exist: GitHub returns 404, RestClient raises HttpClientErrorException.NotFound, and GlobalExceptionHandler returns 404 with an error message.
+
+User gives an invalid username: There is no username input in the API. Users submit a repository URL; GitHub owner is parsed from the URL. Invalid URL structure can cause runtime errors rather than a controlled 400.
+
+GitHub rate-limits the application: A GitHub 403 is mapped to HTTP 403 with a rate-limit message. No quota inspection, wait, retry, or backoff is implemented.
+
+PostgreSQL is unavailable: Startup or repository operations fail through the datasource/JPA layer. No custom database error response is implemented.
+
+Database contains no data: Dashboard for an authenticated user with no watchlist returns an empty list. Sync finds no repositories and does nothing. Analysis for an untracked URL throws from orElseThrow.
+
+Two users request the same repository: Each call checks by URL and may race before one sees the other's insert. The unique URL constraint protects database uniqueness, but duplicate-insert exception handling is not implemented. Both users can link the same repository through the many-to-many table.
+
+GitHub returns 500: No explicit handler exists for server errors, so the framework's default error behavior applies. Scheduled sync catches the exception and continues.
+
+Authentication fails: Missing authentication on a protected endpoint is rejected by Spring Security. Invalid credentials are intended to produce 401, but authentication exceptions are not explicitly handled in the global advice. Invalid JWT parse exceptions are also not explicitly mapped.
+
+Request contains invalid data: Bean Validation is absent. Missing request parameters may be rejected by Spring; malformed bodies or malformed URLs can result in framework/runtime errors rather than a standardized validation response.
+
+Application restarts: JWTs remain valid until expiry if the same secret is used, because sessions are stateless. Stored users, repositories, watchlists, and snapshots remain in PostgreSQL. Scheduled synchronization resumes when the application starts and reaches the next cron time.
+
+One thousand requests arrive simultaneously: Web threads may block on synchronous GitHub calls and database operations. There is no visible rate limiter, queue, cache, or circuit breaker. The application and GitHub may become bottlenecks.
+
+25. COMPLETE DATA FLOW
+======================
+
+1. User -> GitMetrics -> GitHub -> GitMetrics -> User
+
+  User/client
+      |
+      | POST /github/track?url=...
+      v
+  GitMetrics Security -> GitHubController -> GitHubService
+                                             |
+                                             | GET /repos/owner/repo
+                                             v
+                                       GitHub API
+                                             |
+                                             v
+                                  GitHubResponse DTO
+                                             |
+             +-------------------------------+
+             | calculate health, save snapshot
+             v
+       RepoAnalysis/track response
+             |
+             v
+        User/client
+
+2. GitMetrics -> Database
+
+  GitHubService
+      |
+      +--> GitRepo.findByUrl / save github
+      |
+      +--> SnapRepo.save snap
+      |
+      +--> SnapRepo.findByGitHubOrderByCapturedAtDesc(..., PageRequest(0,2))
+      |
+      v
+  PostgreSQL: users, github_repos, snap, user_watchlists
+
+3. Authentication flow
+
+  Register -> BCrypt hash -> UserRepo.save
+  Login -> AuthenticationManager -> DaoAuthenticationProvider
+         -> MyUserDetailsService -> UserRepo.findByEmail
+         -> BCrypt verify -> JWTService.generateToken
+  Protected request -> Authorization Bearer JWT -> JwtFilter
+         -> JWTService parse/validate -> UserPrincipal
+         -> SecurityContext -> controller Authentication.getName()
+
+4. Important API flow
+
+  POST /github/users/watchlist?url=...
+      -> JwtFilter
+      -> UserController.addToWatchlist
+      -> authentication.getName()
+      -> UserService.addRepoToWatchlist
+      -> GitHubService.githubresponse
+      -> GitHub API + GitRepo + SnapRepo
+      -> User.watchlists.add
+      -> UserRepo.save
+      -> success message
+
+5. Vector flow
+
+  CURRENTLY NOT IMPLEMENTED.
+  There is no Input -> Embedding -> Vector DB -> Similarity Search flow.
+
+26. INTERVIEW QUESTIONS AND ANSWERS
+====================================
+
+BEGINNER
+--------
+
+Q1. What is GitMetrics?
+Short: A Spring Boot API that tracks GitHub repository metrics and history.
+Detailed: It fetches stars, forks, and open issues, calculates a health score, stores snapshots, and supports authenticated watchlists and dashboards.
+Example: POST /github/track stores a repository snapshot.
+
+Q2. Why did you build it?
+Short: To avoid manually comparing repository metrics over time.
+Detailed: GitHub displays current counts, while GitMetrics stores snapshots and derives a trend.
+Example: The dashboard uses the newest two snap entities.
+
+Q3. What technologies did you use?
+Short: Java 21, Spring Boot, REST, JPA/Hibernate, PostgreSQL support, Spring Security/JWT, Maven, and Docker.
+Detailed: Controllers expose JSON, services implement logic, repositories persist entities, and RestClient calls GitHub.
+Example: pom.xml contains the actual dependencies; there is no vector or AI technology.
+
+Q4. Explain the architecture.
+Short: It is a layered monolith.
+Detailed: Security and controllers sit above services, repositories sit above JPA/database access, and GitHubService integrates the external API.
+Example: GitHubController -> GitHubService -> GitRepo/SnapRepo and GitHub API.
+
+Q5. What does a snapshot represent?
+Short: A repository's metrics at a capture time.
+Detailed: snap stores stars, forks, open issues, healthScore, capturedAt, and a repository foreign key.
+Example: Every tracking or hourly sync call creates a snap.
+
+Q6. What is the health score?
+Short: (stars + 2 * forks) / (issues + 1).
+Detailed: AnalysisService weights forks twice, uses issues in the denominator, and adds one to avoid division by zero.
+Example: 100 stars, 50 forks, 10 issues gives 200/11.
+
+Q7. What endpoints exist?
+Short: Register, login, track, analysis, watchlist, and dashboard.
+Detailed: The exact paths are documented in the API section; there are no hidden vector or admin endpoints.
+Example: GET /github/users/dashboard returns a list of RepoAnalysisResponse.
+
+Q8. Is there a frontend?
+Short: No frontend is present.
+Detailed: The repository contains a backend and static/templates directories are empty in the visible project structure.
+Example: A client must call the REST endpoints directly.
+
+Q9. What does Docker do?
+Short: Builds and runs the Java JAR in a two-stage image.
+Detailed: Maven compiles in a build image and the JAR runs in an Eclipse Temurin 21 image on port 8080.
+Example: ENTRYPOINT is java -jar app.jar.
+
+Q10. What database does it use?
+Short: PostgreSQL is the intended relational database.
+Detailed: The driver and dialect are configured, and JPA entities define users, repositories, snapshots, and a join table.
+Example: User.watchlists maps to user_watchlists.
+
+INTERMEDIATE
+------------
+
+Q11. Why Spring Boot?
+Short: It integrates REST, security, JPA, configuration, and embedded server setup.
+Detailed: @SpringBootApplication and auto-configuration reduce infrastructure code while preserving standard Spring layering.
+Example: Spring creates the GitRepo implementation at runtime.
+
+Q12. Why PostgreSQL?
+Short: The data has clear relational relationships and constraints.
+Detailed: Users share repositories through a join table and repositories have ordered historical snapshots.
+Example: URL and email uniqueness are database constraints.
+
+Q13. Why DTOs?
+Short: To separate external/API response contracts from persistence models.
+Detailed: GitHubResponse maps GitHub JSON and RepoAnalysisResponse exposes calculated results.
+Example: GitHub's stargazers_count maps to the DTO field stars.
+
+Q14. Explain dependency injection.
+Short: Spring creates beans and supplies them to dependent classes.
+Detailed: GitHubService receives RestClient, repositories, and AnalysisService rather than constructing them.
+Example: AppConfig exposes RestClient with @Bean.
+
+Q15. How does GitHub integration work?
+Short: RestClient performs synchronous GET /repos/{owner}/{repo} calls.
+Detailed: extractPath derives path variables, Jackson creates GitHubResponse, and the service persists a snapshot.
+Example: Both tracking and analysis call the same GitHub resource.
+
+Q16. How is authentication handled?
+Short: BCrypt credentials plus stateless signed JWTs.
+Detailed: AuthenticationManager loads User through MyUserDetailsService, then JwtFilter validates bearer tokens on later calls.
+Example: authentication.getName() is the email subject.
+
+Q17. How is authorization handled?
+Short: Registration/login are public; every other endpoint requires authentication.
+Detailed: SecurityConfig has no role-specific request rules, and UserPrincipal grants USER to every user.
+Example: The dashboard requires a valid JWT but has no admin role.
+
+Q18. What happens during tracking?
+Short: Fetch, find/create repository, calculate, snapshot, return GitHubResponse.
+Detailed: GitHubService performs the whole synchronous workflow and logs the trend.
+Example: The trend is not included in the track response.
+
+Q19. Why are snapshots stored?
+Short: To compare repository health over time.
+Detailed: Current GitHub values alone cannot show growth; capturedAt and healthScore provide history.
+Example: SnapRepo loads the newest two snapshots.
+
+Q20. What does @Transactional do here?
+Short: It groups watchlist writes and keeps dashboard reads in a read-only transaction.
+Detailed: It also supports lazy watchlist access inside getUserDashboard.
+Example: addRepoToWatchlist is transactional and saves User.
+
+Q21. How does the dashboard work?
+Short: Load the user, iterate watchlists, load two snapshots, and create response records.
+Detailed: Empty history returns zero metrics and the analysis service supplies the trend message.
+Example: A first snapshot produces Not enough data to calculate growth yet.
+
+Q22. How does scheduled sync work?
+Short: SyncService runs at the start of every hour.
+Detailed: It finds all repositories and calls GitHubService.githubresponse for each, catching failures per repository.
+Example: One failed repository does not stop later loop iterations.
+
+Q23. How are GitHub errors handled?
+Short: 404 and 403 are mapped by GlobalExceptionHandler.
+Detailed: NotFound becomes repository-not-found and Forbidden becomes rate-limit-exceeded.
+Example: GitHub 500 and network failures have no dedicated handler.
+
+Q24. Is GitHub authentication implemented?
+Short: No.
+Detailed: The RestClient sends Accept and User-Agent only; no GitHub token or OAuth flow exists.
+Example: Public API rate limits apply unless future configuration changes this.
+
+Q25. What are the main entities?
+Short: User, github, and snap.
+Detailed: User has many-to-many watchlists; github has one-to-many snapshots; snap has a many-to-one repository.
+Example: snap.repo_id references github.
+
+Q26. What is the role of UserPrincipal?
+Short: It adapts the User entity to Spring Security's UserDetails interface.
+Detailed: It exposes email as username, BCrypt hash as password, and a USER authority.
+Example: MyUserDetailsService returns new UserPrincipal(user).
+
+Q27. Why use a scheduled job?
+Short: To collect fresh snapshots without requiring a user request.
+Detailed: It makes historical monitoring automatic after a repository has been stored.
+Example: Every hour it reuses GitHubService.githubresponse.
+
+Q28. What input validation exists?
+Short: Only basic service/database checks.
+Detailed: There are no Bean Validation annotations or URL parser validation; malformed URLs can fail at runtime.
+Example: extractPath eventually indexes parts[0] and parts[1].
+
+Q29. What tests exist?
+Short: Only a context-load test.
+Detailed: There are no visible unit, controller, repository, security, or integration tests.
+Example: GitMetricsApplicationTests only calls contextLoads.
+
+Q30. Why use Docker multi-stage builds?
+Short: Build tooling and runtime packaging are separated.
+Detailed: The first stage creates the JAR; the second stage contains the application runtime and JAR.
+Example: The final image does not copy source code.
+
+ADVANCED
+--------
+
+Q31. How would you scale GitMetrics?
+Short: Add caching, batching, asynchronous ingestion, database indexes, and coordinated scheduling.
+Detailed: Stateless API replicas can scale horizontally, but scheduled sync needs a distributed lock and GitHub calls need quotas/resilience.
+Example: Move sync to a queue-backed worker and keep dashboard reads separate.
+
+Q32. How would you handle GitHub rate limits?
+Short: Track quota headers, use authenticated access, cache responses, and back off.
+Detailed: Current code only maps 403; production needs quota-aware scheduling and retry policy.
+Example: Do not refresh the same repository on every simultaneous request.
+
+Q33. How would you introduce caching?
+Short: Cache repository responses by canonical owner/repository with a short TTL.
+Detailed: Cache current metrics, invalidate or refresh on scheduled sync, and retain snapshots separately.
+Example: A cache prevents repeated GET /repos calls during a burst.
+
+Q34. How would you secure GitHub tokens?
+Short: Prefer a secret manager and never commit them.
+Detailed: Inject token through runtime secrets, redact logs, rotate it, and scope permissions minimally.
+Example: The current code has no token, so this is a future integration concern.
+
+Q35. How would you handle concurrent requests for the same repository?
+Short: Canonicalize URLs, rely on a unique constraint, and handle conflict/retry.
+Detailed: Current check-then-insert can race even though url is unique.
+Example: Catch duplicate-key failure and reload the existing github entity.
+
+Q36. How would you make GitMetrics resilient to GitHub failures?
+Short: Add timeouts, retries with backoff, circuit breaker, caching, and asynchronous sync.
+Detailed: User-facing requests could return cached data or a clear 503 while scheduled work retries later.
+Example: The current RestClient has no visible timeout policy.
+
+Q37. How would you migrate to microservices?
+Short: Separate ingestion/sync from the API and analytics only when scale justifies it.
+Detailed: Define events or jobs for snapshot capture, preserve a shared contract, and avoid splitting a small CRUD flow prematurely.
+Example: A Repository Ingestion service could own GitHub calls while the API reads stored snapshots.
+
+Q38. How would you improve database performance?
+Short: Add indexes, batch dashboard queries, paginate, and manage snapshot retention.
+Detailed: The per-repository snapshot lookup can create N+1 behavior and the snapshot table grows forever.
+Example: Query latest snapshots for all repository IDs in one projection query.
+
+Q39. How would you design for one million users?
+Short: Keep APIs stateless, partition workloads, cache shared repositories, and use managed relational infrastructure.
+Detailed: Separate user/watchlist reads from repository ingestion, queue refreshes, coordinate workers, rate-limit GitHub access, and add observability.
+Example: Store one shared repository snapshot stream rather than fetching separately per user.
+
+Q40. How would you improve authentication?
+Short: Remove fallback secrets, add safe DTOs and explicit JWT error handling, and use secret management.
+Detailed: Add short token lifetimes/refresh policy, key rotation, HTTPS, rate limiting, and security tests.
+Example: Never serialize User directly from registration.
+
+Q41. What happens with multiple application replicas and @Scheduled?
+Short: Each replica may run the same hourly job.
+Detailed: The current scheduler is local to each process and has no distributed lock.
+Example: Three replicas could make three GitHub refresh calls per repository.
+
+Q42. What is the biggest correctness risk in URL handling?
+Short: Raw string replacement and array indexing are fragile.
+Detailed: Different URL formats, paths, query strings, or missing segments can produce incorrect owner/repository values or exceptions.
+Example: A URL with no second path segment can fail before GitHub is called.
+
+Q43. How would you avoid exposing a password hash?
+Short: Return a registration response DTO without password.
+Detailed: Request DTO and response DTO should be separate from User entity; use Jackson ignore only as defense in depth.
+Example: Registration should return id, email, and name only.
+
+Q44. Is health score a standard GitHub metric?
+Short: No, it is an application-specific formula.
+Detailed: AnalysisService assigns a two-times fork weight and divides by issues plus one; it is useful for consistent comparison but not an official GitHub health measure.
+Example: An interviewer should be told the formula is a project decision.
+
+Q45. What observability exists?
+Short: Basic System.out.println statements and optional SQL logging.
+Detailed: No metrics, tracing, structured logger, health endpoint configuration, or alerting is evident.
+Example: Sync prints started, synced, failed, and finished messages.
+
+Q46. What should be migrated first for production?
+Short: Secrets, validation/error handling, database migrations, tests, and resilience.
+Detailed: These address security and correctness before adding advanced scaling.
+Example: Replace ddl-auto update with controlled migrations.
+
+Q47. Why not use a vector database?
+Short: The problem is structured numeric repository metrics, not semantic search.
+Detailed: Stars/forks/issues and relationships fit relational columns; embeddings would add complexity without a visible requirement.
+Example: No pgvector or embedding dependency exists.
+
+Q48. How would you test the GitHub boundary?
+Short: Mock the HTTP client or use a local stub server.
+Detailed: Verify path construction, JSON mapping, error statuses, and persistence decisions without calling real GitHub.
+Example: Test stargazers_count maps into GitHubResponse.stars.
+
+27. EXPLAIN THIS CODE QUESTIONS
+================================
+
+1. GitMetricsApplication.main
+- Starts SpringApplication and enables scheduling.
+- It is the application entry point.
+- Follow-up: What does @SpringBootApplication combine?
+
+2. SecurityConfig.securityFilterChain
+- Disables CSRF, permits register/login, requires authentication elsewhere, uses stateless sessions, and inserts JwtFilter.
+- It defines the request security boundary.
+- Follow-up: Why can CSRF disabling be acceptable for bearer APIs?
+
+3. JwtFilter.doFilterInternal
+- Reads a Bearer token, extracts the email, loads UserDetails, validates the token, and sets SecurityContext.
+- It connects JWTs to controller Authentication.
+- Follow-up: What should happen for malformed JWTs?
+
+4. JWTService.generateToken
+- Creates an HMAC-signed token with email subject, issued time, and ten-hour expiration.
+- It supplies credentials for later stateless calls.
+- Follow-up: Where should the signing secret live?
+
+5. UserService.register
+- Checks duplicate email, hashes password, and saves User.
+- It implements account creation.
+- Follow-up: Why should it return a response DTO?
+
+6. UserService.verify
+- Delegates credentials to AuthenticationManager and generates a token if authenticated.
+- It separates credential verification from token creation.
+- Follow-up: Which exception does failed authentication usually produce?
+
+7. GitHubService.githubresponse
+- Fetches GitHub data, finds/creates repository, calculates health, stores snapshot, and computes trend.
+- It is the central ingestion workflow reused by tracking, watchlist addition, and sync.
+- Follow-up: How would you make it idempotent and resilient?
+
+8. GitHubService.extractPath
+- Removes common GitHub URL prefixes and keeps the first two path segments.
+- It converts a user URL into GitHub API path components.
+- Follow-up: What malformed inputs can break it?
+
+9. GitHubService.getRepoAnalysis
+- Fetches current data, requires stored repository, loads two snapshots, calculates health/trend, and returns RepoAnalysisResponse.
+- It combines live data with history.
+- Follow-up: Should analysis create a new snapshot too?
+
+10. AnalysisService.calculateHealthScore
+- Applies the project formula for health.
+- It isolates business calculation from HTTP and persistence.
+- Follow-up: How would you make weights configurable?
+
+11. AnalysisService.getGrowthTrend
+- Returns a not-enough-data message for fewer than two snapshots; otherwise compares health scores.
+- It produces human-readable trend output.
+- Follow-up: Is health-score growth enough to describe repository growth?
+
+12. UserService.addRepoToWatchlist
+- Loads user, ingests repository, finds entity, adds it to watchlist, and saves.
+- It combines external discovery and relationship persistence.
+- Follow-up: What race condition exists on repository creation?
+
+13. UserService.getUserDashboard
+- Loads a user, iterates watchlists, loads up to two snapshots, and maps to response records.
+- It creates the user-facing dashboard projection.
+- Follow-up: How would you avoid N+1 queries?
+
+14. SnapRepo.findByGitHubOrderByCapturedAtDesc
+- Derived Spring Data query returns newest snapshots, limited by Pageable.
+- It supports trend and dashboard calculations.
+- Follow-up: What index would help this query?
+
+15. GlobalExceptionHandler
+- Maps GitHub NotFound and Forbidden exceptions to JSON status responses.
+- It centralizes two external API error translations.
+- Follow-up: What other exceptions should be handled?
+
+16. SyncService.syncData
+- Runs hourly, loads all repositories, refreshes each, and catches per-repository failures.
+- It automates snapshot collection.
+- Follow-up: What changes are needed for multiple replicas?
+
+17. AppConfig.restClient
+- Creates the GitHub RestClient with base URL and default headers.
+- It centralizes integration configuration as a Spring bean.
+- Follow-up: How would you add timeout and authentication conditionally?
+
+18. User entity watchlists mapping
+- Defines a lazy many-to-many relationship through user_watchlists with persist/merge cascade.
+- It models shared watched repositories.
+- Follow-up: What are the implications of cascade and lazy loading?
+
+28. RESUME EXPLANATION
+======================
+
+Three defensible resume bullets:
+- Built a Java 21 Spring Boot REST API that retrieves GitHub repository metrics, calculates a custom health score, and stores timestamped snapshots using Spring Data JPA.
+- Implemented stateless JWT authentication with BCrypt password hashing, user registration/login, repository watchlists, and dashboard analysis endpoints.
+- Containerized the Maven-built application with a multi-stage Dockerfile and added hourly scheduled synchronization of tracked repositories.
+
+Technologies to mention: Java 21, Spring Boot 3.5.4, Spring Web, Spring Security, JWT/JJWT, BCrypt, Spring Data JPA/Hibernate, PostgreSQL driver, Maven, Docker, and GitHub REST API.
+
+Do not claim:
+- A frontend, because none is present.
+- Azure deployment, because none is present.
+- pgvector, AI, embeddings, or semantic search, because none is present.
+- Specific performance metrics, user counts, uptime, or API volume, because they cannot be derived from the repository.
+
+Interview explanation: describe the API, the live GitHub integration, snapshot persistence, JWT boundary, scheduled sync, and the improvements you would make for production.
+
+29. 30-SECOND PROJECT PITCH
+============================
+
+GitMetrics is a Spring Boot backend I built to monitor GitHub repositories over time. Users register and log in with JWT authentication, then submit repository URLs, add repositories to watchlists, and view dashboard analysis. The backend calls GitHub's REST API, stores repository snapshots in PostgreSQL through JPA, calculates a health score from stars, forks, and issues, and compares recent snapshots to show a trend. I also added hourly synchronization and Docker packaging. The current project is intentionally a REST backend; a frontend and production-grade resilience features would be next improvements.
+
+30. 2-MINUTE PROJECT PITCH
+===========================
+
+GitMetrics is a layered Spring Boot REST application for tracking GitHub repository health over time. The main problem is that GitHub shows current repository counts, but it does not give this application a user-specific watchlist and custom historical comparison workflow. GitMetrics lets a user register, log in, track a repository URL, add it to a watchlist, and retrieve dashboard results.
+
+The request enters through a controller. Spring Security protects everything except registration and login. Passwords are hashed with BCrypt, and login produces a signed ten-hour JWT. On protected requests, JwtFilter validates the bearer token, loads the user by email, and puts the authenticated identity in the SecurityContext.
+
+GitHubService is the main integration service. It extracts an owner and repository from the submitted URL and calls GitHub's GET /repos/{owner}/{repo} endpoint through a configured RestClient. The JSON is mapped into GitHubResponse. The service finds or creates a github entity, calculates the formula (stars + 2 * forks) / (issues + 1), and saves a snap entity with the metric values and capture time. It then reads the two newest snapshots and AnalysisService creates a growth string. UserService uses the same ingestion flow when a user adds a repository to a watchlist, and it builds dashboard RepoAnalysisResponse objects from the latest snapshots.
+
+The persistence layer uses Spring Data JPA repositories for users, repositories, and snapshots. A User has a many-to-many watchlist relationship with github, and github has a one-to-many relationship with snap. SyncService runs this tracking workflow at the start of every hour. The app is built with Maven and packaged in a multi-stage Java 21 Docker image.
+
+The most important limitations are that validation and tests are minimal, error handling covers only two GitHub statuses, GitHub calls are synchronous, no GitHub token or caching exists, the scheduled job is not coordinated across replicas, and a fallback JWT secret is present in configuration. Those are the first production improvements I would discuss.
+
+31. PROJECT WEAKNESSES
+======================
+
+1. Fallback JWT secret in source configuration.
+Why it matters: Anyone with the source can potentially forge tokens when the environment variable is absent.
+Improvement: Require an external secret, rotate any exposed key, and fail startup if missing.
+
+2. Commented database credentials.
+Why it matters: Comments remain in repository history and may reveal real credentials.
+Improvement: Remove them and rotate if real.
+
+3. User entity returned on registration.
+Why it matters: It can serialize the BCrypt hash.
+Improvement: Return a safe response DTO and never expose password fields.
+
+4. No Bean Validation.
+Why it matters: Bad email, empty passwords, and malformed URLs reach business logic.
+Improvement: Add validated request DTOs and consistent 400 responses.
+
+5. Fragile URL parsing.
+Why it matters: String replacement and array indexing do not robustly validate URLs.
+Improvement: Parse URI, enforce github.com host, canonicalize owner/repo, and reject extra/invalid paths.
+
+6. Incomplete exception handling.
+Why it matters: Database, network, JWT, duplicate-key, and GitHub 5xx errors can become generic failures.
+Improvement: Add domain exceptions and a complete global handler.
+
+7. No resilience policy.
+Why it matters: A slow/down GitHub can block requests.
+Improvement: Timeouts, retry/backoff, circuit breaker, caching, and asynchronous refresh.
+
+8. Potential N+1 dashboard queries.
+Why it matters: One snapshot query is made per watched repository.
+Improvement: Batch projection query or precomputed latest snapshot table.
+
+9. Unbounded snapshots.
+Why it matters: Hourly sync grows data forever.
+Improvement: retention, archival, aggregation, or configurable history policy.
+
+10. In-process scheduled job.
+Why it matters: Multiple replicas duplicate work.
+Improvement: distributed lock or external worker queue.
+
+11. Minimal tests.
+Why it matters: Core business, security, integration, and error paths can regress unnoticed.
+Improvement: unit, MockMvc, repository, Testcontainers, and security tests.
+
+12. Field injection.
+Why it matters: Dependencies are implicit and harder to test.
+Improvement: constructor injection.
+
+13. Direct System.out logging and SQL logging.
+Why it matters: Poor production observability and possible sensitive log exposure.
+Improvement: structured logger, redaction, metrics, tracing, and production-safe SQL settings.
+
+14. No API documentation.
+Why it matters: Clients must infer contracts from source.
+Improvement: OpenAPI/Swagger documentation and versioned request/response schemas.
+
+15. No explicit cloud deployment.
+Why it matters: Docker alone does not provide database, secrets, networking, or scaling.
+Improvement: deployment manifests, managed PostgreSQL, secret manager, HTTPS, health checks, and CI/CD.
+
+32. FUTURE IMPROVEMENTS
+=======================
+
+HIGH PRIORITY
+1. Remove fallback JWT/database secrets and use a secret manager.
+2. Add request/response DTOs and Jakarta Bean Validation.
+3. Add complete exception handling for 400/401/403/404/409/429/500/503.
+4. Add unit, controller, security, repository, and integration tests.
+5. Add HTTP timeouts, retry/backoff, and circuit breaking for GitHub.
+
+MEDIUM PRIORITY
+6. Add caching and GitHub conditional requests to reduce latency and rate-limit usage.
+7. Replace ddl-auto=update with Flyway or Liquibase migrations.
+8. Batch dashboard queries, add indexes, paginate, and manage snapshot retention.
+9. Replace in-process logging with structured logging, metrics, and health/observability endpoints.
+
+LOW PRIORITY
+10. Add a frontend, richer historical charts, alerts, role management, or asynchronous ingestion after the API contract and production basics are stable.
+
+33. THINGS I MUST MEMORIZE
+===========================
+
+- Architecture: Spring Boot layered REST monolith.
+- Entry point: GitMetricsApplication.
+- Controllers: GitHubController and UserController.
+- Core service: GitHubService; formulas: AnalysisService.
+- Persistence: User, github, snap; UserRepo, GitRepo, SnapRepo.
+- GitHub call: GET https://api.github.com/repos/{owner}/{repo}.
+- Authentication: BCrypt login plus stateless JWT Bearer filter.
+- Public endpoints: POST /github/users/register and POST /github/users/login.
+- Protected endpoints: /github/track, /github/analysis, /github/users/watchlist, /github/users/dashboard.
+- Main flow: URL -> controller -> GitHubService -> GitHub API -> DTO -> entity/snapshot -> analysis -> JSON.
+- Health score: (stars + 2 * forks) / (issues + 1).
+- Trend: compares two newest snapshot health scores.
+- Scheduler: SyncService at cron 0 0 * * * *.
+- Deployment: two-stage Java 21 Docker image, port 8080.
+- Not present: frontend, OAuth, GitHub token, pgvector, embeddings, Azure config.
+- Biggest risks: fallback secret, missing validation/error handling/tests, synchronous calls, uncoordinated scheduler.
+
+34. FINAL INTERVIEW CHEAT SHEET
+===============================
+
+GitMetrics = GitHub repository metric tracking and historical analysis REST API.
+Architecture = Layered Spring Boot monolith.
+Backend = Java 21, Spring Boot REST controllers and services.
+Database = PostgreSQL intended through JPA/Hibernate; users, github_repos, snap, user_watchlists.
+External API = GitHub REST GET /repos/{owner}/{repo}.
+Authentication = BCrypt passwords and stateless signed JWTs; no OAuth.
+Input = User JSON for registration/login; url query parameter for repository operations; Bearer JWT for protected calls.
+Output = GitHubResponse, RepoAnalysisResponse, token JSON, messages, or dashboard list.
+Main flow = Controller -> Service -> GitHub API and repositories -> AnalysisService -> response.
+Important classes = GitMetricsApplication, SecurityConfig, JwtFilter, JWTService, UserService, GitHubService, AnalysisService, SyncService.
+Deployment = Maven-built JAR in a Java 21 Docker image; port 8080; no Azure configuration.
+Security = BCrypt and JWT are implemented; secret management, validation, safe user output, and JWT error handling need improvement.
+Biggest challenge = Coordinating live GitHub data, historical snapshots, rate limits, and scheduled refreshes.
+Biggest improvement = Production hardening: external secrets, validation, resilient GitHub client, tests, migrations, and coordinated jobs.
+Why this technology? = Spring Boot integrates REST/security/JPA; PostgreSQL fits relationships/history; Docker standardizes runtime.
+How I would scale it = Cache and canonicalize repository data, batch dashboard queries, queue sync work, use distributed scheduling, add indexes/retention, and horizontally scale stateless API instances.
+
+SOURCE FILES INSPECTED
+======================
+
+Application and build:
+- GitMetricsApplication.java
+- pom.xml
+- Dockerfile
+- mvnw
+- mvnw.cmd
+- .mvn/wrapper/maven-wrapper.properties
+- HELP.md
+- .gitignore
+- .dockerignore
+- .gitattributes
+
+Configuration and resources:
+- src/main/resources/application.properties
+- src/main/java/com/example/GitMetrics/config/AppConfig.java
+- src/main/java/com/example/GitMetrics/config/SecurityConfig.java
+- src/main/java/com/example/GitMetrics/config/JwtFilter.java
+
+Controllers:
+- src/main/java/com/example/GitMetrics/controller/GitHubController.java
+- src/main/java/com/example/GitMetrics/controller/UserController.java
+
+Services:
+- src/main/java/com/example/GitMetrics/service/GitHubService.java
+- src/main/java/com/example/GitMetrics/service/UserService.java
+- src/main/java/com/example/GitMetrics/service/AnalysisService.java
+- src/main/java/com/example/GitMetrics/service/JWTService.java
+- src/main/java/com/example/GitMetrics/service/MyUserDetailsService.java
+- src/main/java/com/example/GitMetrics/service/SyncService.java
+
+DTOs:
+- src/main/java/com/example/GitMetrics/dto/GitHubResponse.java
+- src/main/java/com/example/GitMetrics/dto/RepoAnalysisResponse.java
+
+Models/entities:
+- src/main/java/com/example/GitMetrics/model/User.java
+- src/main/java/com/example/GitMetrics/model/UserPrincipal.java
+- src/main/java/com/example/GitMetrics/model/github.java
+- src/main/java/com/example/GitMetrics/model/snap.java
+
+Repositories:
+- src/main/java/com/example/GitMetrics/repo/UserRepo.java
+- src/main/java/com/example/GitMetrics/repo/GitRepo.java
+- src/main/java/com/example/GitMetrics/repo/SnapRepo.java
+
+Exceptions and tests:
+- src/main/java/com/example/GitMetrics/exception/GlobalExceptionHandler.java
+- src/test/java/com/example/GitMetrics/GitMetricsApplicationTests.java
+
+Repository/development metadata inspected:
+- .idea/workspace.xml
+- Git branch and commit metadata
+- target and target_test-classes were treated as generated artifacts, not as source of truth.

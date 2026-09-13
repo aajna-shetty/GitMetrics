@@ -25,14 +25,13 @@ public class GitHubService {
     @Autowired
     private AnalysisService analysisService;
     public GitHubResponse githubresponse(String url){
-        String path = extractPath(url);
 
 
         String[] parts = extractPath(url).split("/");
         GitHubResponse response = restClient.get()
                 .uri("/repos/{owner}/{repo}", parts[0], parts[1])
                 .retrieve()
-                .body(GitHubResponse.class);
+                .body(GitHubResponse.class);//dto
         if (response==null) return null;
 
         github gitHub= gitRepo.findByUrl(url)
@@ -43,7 +42,7 @@ public class GitHubService {
                                 newRepo.setRepoName(response.name());
                                 newRepo.setName(response.name());
                                 return gitRepo.save(newRepo);
-                            });
+                            });//db
 
 
         double health = analysisService.calculateHealthScore(
@@ -113,5 +112,12 @@ public class GitHubService {
                 trend
         );
     }
-
 }
+//        Accept a GitHub repository URL.
+//                Call the GitHub REST API.
+//        Fetch repository details.
+//                Save the repository if it doesn't already exist.
+//        Create a snapshot of the repository metrics.
+//                Calculate the repository health score.
+//        Determine the repository growth trend.
+//                Return the required data to the controller.
